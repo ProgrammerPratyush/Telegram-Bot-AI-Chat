@@ -1,0 +1,18 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "api/bot.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "env": {
+    "BOT_TOKEN": "7598031334:AAHagr06D1VTBFL4yh0lT-LXZmRDKzdewYM"  // Add your Telegram Bot Token here securely
+  },
+  "routes": [
+    {
+      "src": "/api/bot",
+      "dest": "/api/bot.py"
+    }
+  ]
+}
