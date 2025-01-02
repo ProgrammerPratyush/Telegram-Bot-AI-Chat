@@ -1,3 +1,10 @@
+import os
+import sqlite3
+import pdfplumber
+from dotenv import load_dotenv
+import openai
+import requests
+from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -7,11 +14,7 @@ from telegram.ext import (
     filters,
     CallbackContext,
 )
-import os
-from dotenv import load_dotenv
-import openai
-import requests
-from bs4 import BeautifulSoup
+import random
 
 # Load API keys from .env file
 load_dotenv()
@@ -22,68 +25,61 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai.api_key = OPENAI_API_KEY
 
 # Conversation states
-INDUSTRY, OBJECTIVE, WEBSITE, SOCIAL_MEDIA, PPC, AUDIENCE, LOCATION = range(7)
+INDUSTRY, OBJECTIVE, WEBSITE, SOCIAL_MEDIA, PPC, AUDIENCE, LOCATION, UPLOAD_DOC = range(8)
 
-# Send welcome message directly when the bot starts
-async def send_welcome_message(application):
-    updates = await application.bot.get_updates()  # Await the updates coroutine
-    for update in updates:
-        await application.bot.send_message(
-            chat_id=update.message.chat.id,
-            text=(
-                "Welcome to the Business Assistant Bot! I can help you with finding trendy keywords based on the answers you give me. "
-                "Be ready, I will ask you questions below one by one.\n\n"
-                "Here are the commands you can use:\n"
-                "- To start, use: /start\n"
-                "- To know the trends in PPC and more: /trends\n"
-                "- To ask business-related questions: /faq\n\n"
-                "Let’s get started!"
-            )
-        )
+# Function to extract text from uploaded document
+def extract_text_from_pdf(pdf_file_path):
+    extracted_text = ""
+    with pdfplumber.open(pdf_file_path) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text()
+            if text:
+                extracted_text += text + "\n"
+    return extracted_text
 
 # Start command
-async def start(update: Update, context) -> int:
+async def start(update: Update, context: CallbackContext) -> int:
     await update.message.reply_text("What industry is your business in?")
     return INDUSTRY
 
 # Collect industry input
-async def industry(update: Update, context) -> int:
+async def industry(update: Update, context: CallbackContext) -> int:
     context.user_data['industry'] = update.message.text
     await update.message.reply_text("What is your business objective (e.g., lead generation, sales)?")
     return OBJECTIVE
 
 # Collect objective input
-async def objective(update: Update, context) -> int:
+async def objective(update: Update, context: CallbackContext) -> int:
     context.user_data['objective'] = update.message.text
     await update.message.reply_text("Do you have a website? If yes, please share the URL.")
     return WEBSITE
 
 # Collect website input
-async def website(update: Update, context) -> int:
+async def website(update: Update, context: CallbackContext) -> int:
     context.user_data['website'] = update.message.text
     await update.message.reply_text("Do you have any social media platforms? If yes, please share the URL(s).")
     return SOCIAL_MEDIA
 
 # Collect social media input
-async def social_media(update: Update, context) -> int:
+async def social_media(update: Update, context: CallbackContext) -> int:
     context.user_data['social_media'] = update.message.text
     await update.message.reply_text("Do you use PPC campaigns? (yes/no)")
     return PPC
 
 # Collect PPC input
-async def ppc(update: Update, context) -> int:
+async def ppc(update: Update, context: CallbackContext) -> int:
     context.user_data['ppc'] = update.message.text
     await update.message.reply_text("Who are you trying to reach? (e.g., young adults, professionals, etc.)")
     return AUDIENCE
 
 # Collect audience input
-async def audience(update: Update, context) -> int:
+async def audience(update: Update, context: CallbackContext) -> int:
     context.user_data['audience'] = update.message.text
     await update.message.reply_text("What location(s) would you like to target?")
     return LOCATION
 
 # Collect location input and generate keywords
-async def location(update: Update, context) -> int:
+async def location(update: Update, context: CallbackContext) -> int:
     context.user_data['location'] = update.message.text
 
     # Collect all user inputs
@@ -116,30 +112,124 @@ async def location(update: Update, context) -> int:
             max_tokens=200
         )
         keywords = response.choices[0].message['content'].strip()
-        await update.message.reply_text(f"Here are the trending keywords for your business:\n{keywords}")
+        random_keywords = random.sample(keywords.split("\n"), min(5, len(keywords.split("\n"))))
+        await update.message.reply_text(f"Here are some random keywords for your business:\n{', '.join(random_keywords)}")
     except Exception as e:
         await update.message.reply_text("Sorry, I couldn't generate keywords. Please try again later.")
         print(f"Error: {e}")
 
+    await update.message.reply_text("Do you want to upload a document to refine these keywords? (yes/no)")
+    return UPLOAD_DOC
+
+# Handle document upload or exit
+async def upload_doc(update: Update, context: CallbackContext) -> int:
+    user_response = update.message.text.lower()
+    if user_response == "yes":
+        await update.message.reply_text("Please upload your document (PDF only).")
+        return UPLOAD_DOC
+    elif user_response == "no":
+        await update.message.reply_text("Thank you for using the Business Assistant Bot!")
+        return ConversationHandler.END
+    else:
+        await update.message.reply_text("Please respond with 'yes' or 'no'.")
+        return UPLOAD_DOC
+
+# Process uploaded document and regenerate keywords
+async def process_document(update: Update, context: CallbackContext) -> int:
+    if update.message.document and update.message.document.mime_type == "application/pdf":
+        document = update.message.document
+
+        try:
+            # Download the file to a local path
+            file = await context.bot.get_file(document.file_id)
+            file_path = f"{document.file_name}"
+            await file.download_to_drive(file_path)
+
+            # Extract text from the PDF
+            extracted_text = extract_text_from_pdf(file_path)
+
+            # Generate keywords using GPT
+            prompt = f"Generate a list of keywords based on the following document content:\n\n{extracted_text}"
+            response = openai.ChatCompletion.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "You are an expert in digital marketing."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=200
+            )
+            keywords = response.choices[0].message['content'].strip()
+            await update.message.reply_text(f"Here are the refined keywords:\n{keywords}")
+
+        except Exception as e:
+            await update.message.reply_text("Sorry, I couldn't process the document. Please try again later.")
+            print(f"Error: {e}")
+
+    else:
+        await update.message.reply_text("Please upload a valid PDF document.")
+
     return ConversationHandler.END
 
-# Fetch PPC data
+
+# Cancel command
+async def cancel(update: Update, context: CallbackContext) -> int:
+    await update.message.reply_text("Operation cancelled.")
+    return ConversationHandler.END
+
 async def fetch_ppc_data():
     url = "https://databox.com/ppc-industry-benchmarks"
-    response = requests.get(url)
-    soup = BeautifulSoup(response.text, 'html.parser')
-    # Example: Simplify this based on actual HTML structure
-    data = soup.find_all("table")
-    return "Parsed PPC data (example)"  # Replace with actual parsed data
+    try:
+        # Fetch the page content with SSL verification disabled
+        response = requests.get(url, verify=False)  # Disable SSL verification
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # Extract the main content from the 'content-column' class
+        content = soup.find("div", class_="content-column")
+        if not content:
+            return "Could not find the relevant content on the website."
+
+        # Extract and clean text from the content container
+        text_data = content.get_text(separator="\n", strip=True)
+        return text_data
+
+    except Exception as e:
+        print(f"Error fetching PPC data: {e}")
+        return "An error occurred while fetching PPC data."
+
+# Function to split text into chunks
+def split_text_into_chunks(text, max_length=4000):
+    """Split the text into chunks to fit Telegram's message limit."""
+    lines = text.split("\n")
+    chunks = []
+    current_chunk = ""
+
+    for line in lines:
+        if len(current_chunk) + len(line) + 1 > max_length:
+            chunks.append(current_chunk)
+            current_chunk = ""
+        current_chunk += line + "\n"
+
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    return chunks
 
 # Send PPC trends
 async def trends(update: Update, context: CallbackContext):
     try:
+        # Fetch and extract PPC data
         data = await fetch_ppc_data()
-        await update.message.reply_text(f"Here are the latest PPC trends:\n{data}")
+
+        # Split the data into manageable chunks
+        chunks = split_text_into_chunks(data)
+
+        # Send each chunk as a separate message
+        for chunk in chunks:
+            await update.message.reply_text(chunk)
     except Exception as e:
         await update.message.reply_text("Sorry, I couldn't fetch the trends at the moment.")
-        print(f"Error: {e}")
+        print(f"Error in /fetch-ppc-data: {e}")
 
 # Handle FAQ command
 async def faq(update: Update, context: CallbackContext):
@@ -165,22 +255,15 @@ async def faq(update: Update, context: CallbackContext):
         print(f"Error: {e}")
 
 # Cancel conversation
-async def cancel(update: Update, context) -> int:
-    await update.message.reply_text("Operation cancelled.")
-    return ConversationHandler.END
+# async def cancel(update: Update, context) -> int:
+#     await update.message.reply_text("Operation cancelled.")
+#     return ConversationHandler.END
+
 
 # Main function
 def main():
-    # Create application
     application = Application.builder().token(TELEGRAM_BOT_API_KEY).build()
 
-    # Send welcome message as the bot starts
-    application.bot.send_message(
-        chat_id="@AI-Keywords-Bot",  # Set your default chat ID here
-        text="Welcome to the Business Assistant Bot! Let's get started!"
-    )
-
-    # Conversation handler for generating keywords
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
@@ -191,16 +274,18 @@ def main():
             PPC: [MessageHandler(filters.TEXT & ~filters.COMMAND, ppc)],
             AUDIENCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, audience)],
             LOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, location)],
+            UPLOAD_DOC: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, upload_doc),
+                MessageHandler(filters.Document.PDF, process_document),
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
     # Add handlers
-    application.add_handler(CommandHandler("trends", trends))    # Add trends handler
-    application.add_handler(CommandHandler("faq", faq))          # Add FAQ handler
+    application.add_handler(CommandHandler("trends", trends))  # Add trends handler
+    application.add_handler(CommandHandler("faq", faq))  # Add FAQ handler
     application.add_handler(conv_handler)
-
-    # Run the bot
     application.run_polling()
 
 if __name__ == "__main__":
